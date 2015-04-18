@@ -4391,9 +4391,13 @@ mdb_env_setup_locks(MDB_env *env, char *lpath, int mode, int *excl)
 	off_t size, rsize;
 
 #ifdef _WIN32
-	env->me_lfd = CreateFile(lpath, GENERIC_READ|GENERIC_WRITE,
+	int char_len = 1+MultiByteToWideChar(CP_UTF8, 0, lpath, -1, NULL, 0);
+	LPWSTR wstring = malloc(sizeof(wchar_t)*char_len);
+	MultiByteToWideChar(CP_UTF8, 0, lpath, -1, &wstring[0], char_len);
+	env->me_lfd = CreateFile(wstring, GENERIC_READ|GENERIC_WRITE,
 		FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
 		FILE_ATTRIBUTE_NORMAL, NULL);
+	free(wstring);
 #else
 	env->me_lfd = open(lpath, O_RDWR|O_CREAT|MDB_CLOEXEC, mode);
 #endif
@@ -4495,9 +4499,23 @@ mdb_env_setup_locks(MDB_env *env, char *lpath, int mode, int *excl)
 		mdb_hash_enc(&val, encbuf);
 		sprintf(env->me_txns->mti_rmname, "Global\\MDBr%s", encbuf);
 		sprintf(env->me_txns->mti_wmname, "Global\\MDBw%s", encbuf);
-		env->me_rmutex = CreateMutex(&mdb_all_sa, FALSE, env->me_txns->mti_rmname);
+
+		{
+			int char_len = 1+MultiByteToWideChar(CP_UTF8, 0, env->me_txns->mti_rmname, -1, NULL, 0);
+			LPWSTR wstring = malloc(sizeof(wchar_t)*char_len);
+			MultiByteToWideChar(CP_UTF8, 0, env->me_txns->mti_rmname, -1, &wstring[0], char_len);
+			env->me_rmutex = CreateMutex(&mdb_all_sa, FALSE, wstring );
+			free(wstring);
+		}
+
 		if (!env->me_rmutex) goto fail_errno;
-		env->me_wmutex = CreateMutex(&mdb_all_sa, FALSE, env->me_txns->mti_wmname);
+		{
+			int char_len = 1+MultiByteToWideChar(CP_UTF8, 0, env->me_txns->mti_wmname, -1, NULL, 0);
+			LPWSTR wstring = malloc(sizeof(wchar_t)*char_len);
+			MultiByteToWideChar(CP_UTF8, 0, env->me_txns->mti_wmname, -1, &wstring[0], char_len);
+			env->me_wmutex = CreateMutex(&mdb_all_sa, FALSE, wstring);
+			free(wstring);
+		}
 		if (!env->me_wmutex) goto fail_errno;
 #elif defined(MDB_USE_SYSV_SEM)
 		unsigned short vals[2] = {1, 1};
@@ -4547,9 +4565,21 @@ mdb_env_setup_locks(MDB_env *env, char *lpath, int mode, int *excl)
 			goto fail;
 		}
 #ifdef _WIN32
-		env->me_rmutex = OpenMutex(SYNCHRONIZE, FALSE, env->me_txns->mti_rmname);
+		{
+			int char_len = 1+MultiByteToWideChar(CP_UTF8, 0, env->me_txns->mti_rmname, -1, NULL, 0);
+			LPWSTR wstring = malloc(sizeof(wchar_t)*char_len);
+			MultiByteToWideChar(CP_UTF8, 0, env->me_txns->mti_rmname, -1, &wstring[0], char_len);
+			env->me_rmutex = OpenMutex(SYNCHRONIZE, FALSE, wstring);
+			free(wstring);
+		}
 		if (!env->me_rmutex) goto fail_errno;
-		env->me_wmutex = OpenMutex(SYNCHRONIZE, FALSE, env->me_txns->mti_wmname);
+		{
+			int char_len = 1+MultiByteToWideChar(CP_UTF8, 0, env->me_txns->mti_wmname, -1, NULL, 0);
+			LPWSTR wstring = malloc(sizeof(wchar_t)*char_len);
+			MultiByteToWideChar(CP_UTF8, 0, env->me_txns->mti_wmname, -1, &wstring[0], char_len);
+			env->me_wmutex = OpenMutex(SYNCHRONIZE, FALSE, wstring);
+			free(wstring);
+		}
 		if (!env->me_wmutex) goto fail_errno;
 #elif defined(MDB_USE_SYSV_SEM)
 		semid = env->me_txns->mti_semid;
@@ -4664,8 +4694,15 @@ mdb_env_open(MDB_env *env, const char *path, unsigned int flags, mdb_mode_t mode
 		len = OPEN_ALWAYS;
 	}
 	mode = FILE_ATTRIBUTE_NORMAL;
-	env->me_fd = CreateFile(dpath, oflags, FILE_SHARE_READ|FILE_SHARE_WRITE,
-		NULL, len, mode, NULL);
+
+	{
+		int char_len = 1+MultiByteToWideChar(CP_UTF8, 0, dpath, -1, NULL, 0);
+		LPWSTR wstring = malloc(sizeof(wchar_t)*char_len);
+		MultiByteToWideChar(CP_UTF8, 0, dpath, -1, &wstring[0], char_len);
+		env->me_fd = CreateFile(wstring, oflags, FILE_SHARE_READ|FILE_SHARE_WRITE,
+			NULL, len, mode, NULL);
+		free(wstring);
+	}
 #else
 	if (F_ISSET(flags, MDB_RDONLY))
 		oflags = O_RDONLY;
@@ -4694,9 +4731,15 @@ mdb_env_open(MDB_env *env, const char *path, unsigned int flags, mdb_mode_t mode
 			 */
 #ifdef _WIN32
 			len = OPEN_EXISTING;
-			env->me_mfd = CreateFile(dpath, oflags,
-				FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, len,
-				mode | FILE_FLAG_WRITE_THROUGH, NULL);
+			{
+				int char_len = 1+MultiByteToWideChar(CP_UTF8, 0, dpath, -1, NULL, 0);
+				LPWSTR wstring = malloc(sizeof(wchar_t)*char_len);
+				MultiByteToWideChar(CP_UTF8, 0, dpath, -1, &wstring[0], char_len);
+				env->me_mfd = CreateFile(wstring, oflags,
+					FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, len,
+					mode | FILE_FLAG_WRITE_THROUGH, NULL);
+				free(wstring);
+			}
 #else
 			oflags &= ~O_CREAT;
 			env->me_mfd = open(dpath, oflags | MDB_DSYNC, mode);
@@ -8955,8 +8998,12 @@ mdb_env_copy2(MDB_env *env, const char *path, unsigned int flags)
 	 * already in the OS cache.
 	 */
 #ifdef _WIN32
-	newfd = CreateFile(lpath, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+	int char_len = 1+MultiByteToWideChar(CP_UTF8, 0, lpath, -1, NULL, 0);
+	LPWSTR wstring = malloc(sizeof(wchar_t)*char_len);
+	MultiByteToWideChar(CP_UTF8, 0, lpath, -1, &wstring[0], char_len);
+	newfd = CreateFile(wstring, GENERIC_WRITE, 0, NULL, CREATE_NEW,
 				FILE_FLAG_NO_BUFFERING|FILE_FLAG_WRITE_THROUGH, NULL);
+	free(wstring);
 #else
 	newfd = open(lpath, O_WRONLY|O_CREAT|O_EXCL, 0666);
 #endif
