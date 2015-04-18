@@ -5,7 +5,7 @@
  *	BerkeleyDB API, but much simplified.
  */
 /*
- * Copyright 2011-2014 Howard Chu, Symas Corp.
+ * Copyright 2011-2015 Howard Chu, Symas Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -1084,6 +1084,8 @@ struct MDB_txn {
 #define MDB_TXN_ERROR		0x02		/**< txn is unusable after an error */
 #define MDB_TXN_DIRTY		0x04		/**< must write, even if dirty list is empty */
 #define MDB_TXN_SPILLS		0x08		/**< txn or a parent has spilled pages */
+#define MDB_TXN_NOSYNC		0x10		/**< don't sync this txn on commit */
+#define MDB_TXN_NOMETASYNC	0x20		/**< don't sync meta for this txn on commit */
 /** @} */
 	unsigned int	mt_flags;		/**< @ref mdb_txn */
 	/** #dirty_list room: Array size - \#dirty pages visible to this txn.
@@ -1185,7 +1187,8 @@ struct MDB_env {
 	unsigned int	me_psize;	/**< DB page size, inited from me_os_psize */
 	unsigned int	me_os_psize;	/**< OS page size, from #GET_PAGESIZE */
 	unsigned int	me_maxreaders;	/**< size of the reader table */
-	unsigned int	me_numreaders;	/**< max numreaders set by this env */
+	/** Max #MDB_txninfo.%mti_numreaders of interest to #mdb_env_close() */
+	volatile int	me_close_readers;
 	MDB_dbi		me_numdbs;		/**< number of DBs opened */
 	MDB_dbi		me_maxdbs;		/**< size of the DB table */
 	MDB_PID_T	me_pid;		/**< process ID of this env */
@@ -2603,13 +2606,19 @@ mdb_txn_renew0(MDB_txn *txn)
 					return MDB_READERS_FULL;
 				}
 				r = &ti->mti_readers[i];
+				/* Claim the reader slot, carefully since other code
+				 * uses the reader table un-mutexed: First reset the
+				 * slot, next publish it in mti_numreaders.  After
+				 * that, it is safe for mdb_env_close() to touch it.
+				 * When it will be closed, we can finally claim it.
+				 */
+				r->mr_pid = 0;
 				r->mr_txnid = (txnid_t)-1;
 				r->mr_tid = tid;
-				r->mr_pid = pid; /* should be written last, see ITS#7971. */
 				if (i == nr)
 					ti->mti_numreaders = ++nr;
-				/* Save numreaders for un-mutexed mdb_env_close() */
-				env->me_numreaders = nr;
+				env->me_close_readers = nr;
+				r->mr_pid = pid;
 				UNLOCK_MUTEX(rmutex);
 
 				new_notls = (env->me_flags & MDB_NOTLS);
@@ -2748,6 +2757,10 @@ mdb_txn_begin(MDB_env *env, MDB_txn *parent, unsigned int flags, MDB_txn **ret)
 		txn->mt_dbflags = (unsigned char *)(txn->mt_dbs + env->me_maxdbs);
 		txn->mt_dbiseqs = env->me_dbiseqs;
 	} else {
+		if (flags & MDB_NOSYNC)
+			txn->mt_flags |= MDB_TXN_NOSYNC;
+		if (flags & MDB_NOMETASYNC)
+			txn->mt_flags |= MDB_TXN_NOMETASYNC;
 		txn->mt_cursors = (MDB_cursor **)(txn->mt_dbs + env->me_maxdbs);
 		if (parent) {
 			txn->mt_dbiseqs = parent->mt_dbiseqs;
@@ -3479,9 +3492,12 @@ mdb_txn_commit(MDB_txn *txn)
 	mdb_audit(txn);
 #endif
 
-	if ((rc = mdb_page_flush(txn, 0)) ||
-		(rc = mdb_env_sync(env, 0)) ||
-		(rc = mdb_env_write_meta(txn)))
+	if ((rc = mdb_page_flush(txn, 0)))
+		goto fail;
+	if (!F_ISSET(txn->mt_flags, MDB_TXN_NOSYNC) &&
+		(rc = mdb_env_sync(env, 0)))
+		goto fail;
+	if ((rc = mdb_env_write_meta(txn)))
 		goto fail;
 
 	/* Free P_LOOSE pages left behind in dirty_list */
@@ -3675,6 +3691,8 @@ mdb_env_write_meta(MDB_txn *txn)
 		__sync_synchronize();
 #endif
 		mp->mm_txnid = txn->mt_txnid;
+		if (txn->mt_flags & (MDB_TXN_NOSYNC|MDB_TXN_NOMETASYNC))
+			goto done;
 		if (!(env->me_flags & (MDB_NOMETASYNC|MDB_NOSYNC))) {
 			unsigned meta_size = env->me_psize;
 			rc = (env->me_flags & MDB_MAPASYNC) ? MS_ASYNC : MS_SYNC;
@@ -3711,7 +3729,8 @@ mdb_env_write_meta(MDB_txn *txn)
 	off += PAGEHDRSZ;
 
 	/* Write to the SYNC fd */
-	mfd = env->me_flags & (MDB_NOSYNC|MDB_NOMETASYNC) ?
+	mfd = ((env->me_flags & (MDB_NOSYNC|MDB_NOMETASYNC)) ||
+		(txn->mt_flags & (MDB_TXN_NOSYNC|MDB_TXN_NOMETASYNC))) ?
 		env->me_fd : env->me_mfd;
 #ifdef _WIN32
 	{
@@ -4833,8 +4852,12 @@ mdb_env_close0(MDB_env *env, int excl)
 		MDB_PID_T pid = env->me_pid;
 		/* Clearing readers is done in this function because
 		 * me_txkey with its destructor must be disabled first.
+		 *
+		 * We skip the the reader mutex, so we touch only
+		 * data owned by this process (me_close_readers and
+		 * our readers), and clear each reader atomically.
 		 */
-		for (i = env->me_numreaders; --i >= 0; )
+		for (i = env->me_close_readers; --i >= 0; )
 			if (env->me_txns->mti_readers[i].mr_pid == pid)
 				env->me_txns->mti_readers[i].mr_pid = 0;
 #ifdef _WIN32
@@ -7226,6 +7249,7 @@ mdb_cursor_init(MDB_cursor *mc, MDB_txn *txn, MDB_dbi dbi, MDB_xcursor *mx)
 	mc->mc_snum = 0;
 	mc->mc_top = 0;
 	mc->mc_pg[0] = 0;
+	mc->mc_ki[0] = 0;
 	mc->mc_flags = 0;
 	if (txn->mt_dbs[dbi].md_flags & MDB_DUPSORT) {
 		mdb_tassert(txn, mx != NULL);
@@ -9048,7 +9072,7 @@ mdb_env_copy(MDB_env *env, const char *path)
 int ESECT
 mdb_env_set_flags(MDB_env *env, unsigned int flag, int onoff)
 {
-	if (flag & (env->me_map ? ~CHANGEABLE : ~(CHANGEABLE|CHANGELESS)))
+	if ((flag & CHANGEABLE) != flag)
 		return EINVAL;
 	if (onoff)
 		env->me_flags |= flag;
@@ -9157,11 +9181,7 @@ mdb_env_info(MDB_env *env, MDB_envinfo *arg)
 	arg->me_mapaddr = env->me_metas[toggle]->mm_address;
 	arg->me_mapsize = env->me_mapsize;
 	arg->me_maxreaders = env->me_maxreaders;
-
-	/* me_numreaders may be zero if this process never used any readers. Use
-	 * the shared numreader count if it exists.
-	 */
-	arg->me_numreaders = env->me_txns ? env->me_txns->mti_numreaders : env->me_numreaders;
+	arg->me_numreaders = env->me_txns ? env->me_txns->mti_numreaders : 0;
 
 	arg->me_last_pgno = env->me_metas[toggle]->mm_last_pg;
 	arg->me_last_txnid = env->me_metas[toggle]->mm_txnid;

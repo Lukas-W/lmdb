@@ -126,7 +126,7 @@
  *
  *	@author	Howard Chu, Symas Corporation.
  *
- *	@copyright Copyright 2011-2014 Howard Chu, Symas Corp. All rights reserved.
+ *	@copyright Copyright 2011-2015 Howard Chu, Symas Corp. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted only as authorized by the OpenLDAP
@@ -736,7 +736,6 @@ void mdb_env_close(MDB_env *env);
 	 * This may be used to set some flags in addition to those from
 	 * #mdb_env_open(), or to unset these flags.  If several threads
 	 * change the flags at the same time, the result is undefined.
-	 * Most flags cannot be changed after #mdb_env_open().
 	 * @param[in] env An environment handle returned by #mdb_env_create()
 	 * @param[in] flags The flags to change, bitwise OR'ed together
 	 * @param[in] onoff A non-zero value sets the flags, zero clears them.
@@ -931,6 +930,10 @@ int  mdb_env_set_assert(MDB_env *env, MDB_assert_func *func);
 	 * <ul>
 	 *	<li>#MDB_RDONLY
 	 *		This transaction will not perform any write operations.
+	 *	<li>#MDB_NOSYNC
+	 *		Don't flush system buffers to disk when committing this transaction.
+	 *	<li>#MDB_NOMETASYNC
+	 *		Flush system buffers but omit metadata flush when committing this transaction.
 	 * </ul>
 	 * @param[out] txn Address where the new #MDB_txn handle will be stored
 	 * @return A non-zero error value on failure and 0 on success. Some possible
@@ -1469,7 +1472,7 @@ int  mdb_cursor_get(MDB_cursor *cursor, MDB_val *key, MDB_val *data,
 	 * <ul>
 	 *	<li>#MDB_MAP_FULL - the database is full, see #mdb_env_set_mapsize().
 	 *	<li>#MDB_TXN_FULL - the transaction has too many dirty pages.
-	 *	<li>EACCES - an attempt was made to modify a read-only database.
+	 *	<li>EACCES - an attempt was made to write in a read-only transaction.
 	 *	<li>EINVAL - an invalid parameter was specified.
 	 * </ul>
 	 */
@@ -1489,7 +1492,7 @@ int  mdb_cursor_put(MDB_cursor *cursor, MDB_val *key, MDB_val *data,
 	 * @return A non-zero error value on failure and 0 on success. Some possible
 	 * errors are:
 	 * <ul>
-	 *	<li>EACCES - an attempt was made to modify a read-only database.
+	 *	<li>EACCES - an attempt was made to write in a read-only transaction.
 	 *	<li>EINVAL - an invalid parameter was specified.
 	 * </ul>
 	 */
