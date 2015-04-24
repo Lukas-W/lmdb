@@ -96,7 +96,12 @@ extern int cacheflush(char *addr, int nbytes, int cache);
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
+
+#ifndef _WIN32
+#	include <unistd.h>
+#else
+#	include <io.h>
+#endif
 
 #if defined(__sun) || defined(ANDROID)
 /* Most platforms have posix_memalign, older may only have memalign */
@@ -2962,6 +2967,10 @@ mdb_txn_abort(MDB_txn *txn)
 	if (txn != txn->mt_env->me_txn0)
 		free(txn);
 }
+
+#ifdef _WIN32
+typedef LONG_PTR ssize_t, *PSSIZE_T;
+#endif
 
 /** Save the freelist as of this transaction to the freeDB.
  * This changes the freelist. Keep trying until it stabilizes.
